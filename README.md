@@ -17,6 +17,7 @@ kumpulan-bot-wa/
 ├── 📁 bot-wirtz-rag/         # Personality Chatbot — RAG Vektor Cohere, Dialek Jawa Slang, DeepSeek
 ├── 📁 bot-godmode-ai/        # AI Security Research — Boundary Inversion & 33 Parseltongue Techniques
 ├── 📁 bot-cloud-agent/       # Always-On Cloud Agent — Koyeb 24/7, Perplexity Web Search, Nanobot
+├── 📁 sample-data/           # Contoh Ekspor Riwayat Chat Lengkap Grup WhatsApp (Benchmark & Testing)
 └── 📄 README.md              # Dokumentasi & Panduan Lengkap
 ```
 
@@ -164,6 +165,16 @@ kumpulan-bot-wa/
   3. Groq (Kecepatan Eksekusi)
   4. Qwen (Cadangan Alternatif)
 * **📦 Supabase Storage Persistence**: Otomatis mem-backup dan me-restore seluruh direktori sesi, kredensial WhatsApp, dan workspace agen dalam bentuk arsip zip ke Supabase Storage setiap kali container me-restart.
+
+---
+
+### 8. 📁 `sample-data` (Dataset & Patokan Contoh Chat Grup)
+> **Contoh Data Riwayat Chat Grup Asli Lengkap** yang disimpan dalam arsip `WhatsApp_Chat_with_AVOID_PRIME___FT.zip`.
+
+* **Tujuan & Manfaat**:
+  * Berisi riwayat obrolan lengkap (*full chat log export*) dari grup WhatsApp nyata.
+  * Digunakan sebagai patokan (*benchmark*), data uji coba (*testing*), atau bahan dataset untuk melatih sistem RAG / fine-tuning gaya percakapan bot grup.
+  * Membantu memvalidasi regex parser, ekstraksi teks obrolan, penanganan lampiran VCF kontak, dan analisis alur obrolan grup yang dinamis.
 
 ---
 
