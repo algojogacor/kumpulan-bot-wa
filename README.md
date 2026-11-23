@@ -123,11 +123,16 @@ kumpulan-bot-wa/
   * `!startknockout`: Otomatis menyusun bagan babak gugur berdasarkan posisi tim di klasemen grup.
   * `!kogame`, `!kores`: Pemasukan dan koreksi skor babak knockout.
   * `!awards`: Rekapitulasi gelar Juara, Top Scorer, dan Best Goalkeeper.
-* **🤖 Asisten AI Turnamen**:
-  * `!ai`: Asisten tanya-jawab "Omak Peak" yang memahami seluruh konteks turnamen.
+* **🤖 Asisten AI Turnamen & Konteks Game Flash Peak**:
+  * `!ai`: Asisten tanya-jawab "Omak Peak" yang memahami seluruh konteks turnamen dan meta game Flash Peak.
   * `!agent`, `!agentconfirm`: Perencanaan aksi administratif otomatis berbasis bahasa alami.
   * `!saveqna`: Ekstraksi pasangan tanya-jawab dari obrolan grup ke FAQ hidup turnamen.
   * `!trivia` & `!pantun`: Kuis 15 detik turnamen dan pantun jenaka komunitas.
+* **🧠 Flash Peak Game Knowledge Base (`knowledge-base/` & `src/ai/prompts/`)**:
+  * **Database Karakter Lengkap (`FLASH_PEAK_CHARACTERS.md`, `flash_peak_roster_catalog.json`)**: Data otoritatif seluruh karakter Flash Peak (ST, CM, CB, WF, GK), statistik atribut (Power, Speed, Stamina, Shoot, Pass, Dribble, Defense), small skill, ultimate skill, dan pasif.
+  * **Analisis Mekanik & Fisika Gameplay (`FLASH_PEAK_SKILLS_AND_ABILITIES.md`)**: Logika duel bahu (*shoulder barge*), tekel, intersep, dan formula pertahanan kiper.
+  * **Trusted Context Injection (`src/ai/prompts/flashpeak-game-knowledge.ts` & `omak-peak-context.ts`)**: Basis pengetahuan ini disuntikkan secara dinamis ke prompt AI Omak Peak agar jawaban AI selalu akurat (*zero hallucination*) tentang meta game, sinergi tim, dan counter strategi.
+  * **Dataset Trivia Komunitas (`knowledge-base/flashpeak-trivia.json`)**: Kumpulan fakta unik dan bank soal trivia 15 detik untuk perintah `!trivia`.
 
 ---
 
