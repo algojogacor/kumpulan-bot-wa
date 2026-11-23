@@ -1,0 +1,46 @@
+{
+  "agents": {
+    "defaults": {
+      "model": "deepseek-chat",
+      "provider": "deepseek",
+      "workspace": "/app/data"
+    }
+  },
+  "providers": {
+    "deepseek": {
+      "api_key": "${DEEPSEEK_API_KEY_1}"
+    },
+    "perplexity": {
+      "api_key": "${PERPLEXITY_API_KEY_1}"
+    },
+    "groq": {
+      "api_key": "${GROQ_API_KEY}"
+    },
+    "qwen": {
+      "api_key": "${QWEN_API_KEY}"
+    }
+  },
+  "channels": {
+    "whatsapp": {
+      "enabled": true,
+      "bridgeUrl": "ws://127.0.0.1:3001",
+      "bridgeToken": "koyeb-cloud-agent-secure",
+      "allowFrom": [
+        "*",
+        "628999021644",
+        "6289509542780",
+        "6281774156939"
+      ],
+      "groupPolicy": "open"
+    },
+    "telegram": {
+      "enabled": false,
+      "token": "${TELEGRAM_BOT_TOKEN}",
+      "enable_mention": true
+    }
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18790
+  }
+}

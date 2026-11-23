@@ -1,0 +1,241 @@
+const path = require('path');
+const fs = require('fs');
+const commands = new Map();
+
+// Auto-load all command modules
+const commandsDir = path.join(__dirname, 'commands');
+fs.readdirSync(commandsDir).filter(f => f.endsWith('.js')).forEach(f => {
+    const cmd = require(path.join(commandsDir, f));
+    if (cmd.names && cmd.execute) {
+        for (const name of cmd.names) {
+            commands.set(name, cmd);
+        }
+    }
+});
+
+// Module-level config — read from env once
+const PREFIX = process.env.PREFIX || '!';
+const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+
+// Shared state across commands (per-user pack/author settings)
+const state = new Map();
+
+function shouldProcessMessage(msg, botMode = process.env.BOT_MODE || 'dual') {
+    if (!msg || !msg.message) return false;
+
+    const fromMe = Boolean(msg.key?.fromMe);
+    const mode = String(botMode || 'dual').toLowerCase().trim();
+
+    if (mode === 'self') {
+        return fromMe;
+    }
+    if (mode === 'public') {
+        return !fromMe;
+    }
+    // 'dual' or default fallback: process both fromMe and !fromMe
+    return true;
+}
+
+/**
+ * Check if a WhatsApp message is too old to be processed as an interactive command.
+ * Prevents re-executing stale commands replayed during WebSocket reconnects or offline syncs.
+ *
+ * @param {object} msg - The Baileys WAMessage object
+ * @param {number} maxAgeSeconds - Maximum allowable message age in seconds (default: 120s / 2m)
+ * @returns {boolean} True if the message is older than maxAgeSeconds
+ */
+function isMessageStale(msg, maxAgeSeconds = 120) {
+    if (!msg || !msg.messageTimestamp) return false;
+
+    let tsSec = msg.messageTimestamp;
+    if (typeof tsSec === 'object' && tsSec !== null) {
+        if (typeof tsSec.toNumber === 'function') {
+            tsSec = tsSec.toNumber();
+        } else if (tsSec.low !== undefined) {
+            tsSec = tsSec.low;
+        } else {
+            tsSec = Number(tsSec);
+        }
+    } else {
+        tsSec = Number(tsSec);
+    }
+
+    if (!Number.isFinite(tsSec) || tsSec <= 0) return false;
+
+    // Normalize millisecond timestamps if encountered
+    if (tsSec > 1e11) tsSec = Math.floor(tsSec / 1000);
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const ageSeconds = nowSec - tsSec;
+
+    // Drop messages older than maxAgeSeconds
+    return ageSeconds > maxAgeSeconds;
+}
+
+function getSenderJid(msg, sock) {
+    let jid;
+    if (msg?.key?.fromMe) {
+        if (sock?.user?.id) {
+            jid = sock.user.id;
+        } else {
+            jid = msg?.key?.participant || msg?.key?.remoteJid;
+        }
+    } else {
+        jid = msg?.key?.participant || msg?.key?.remoteJid;
+    }
+    return jid ? String(jid).replace(/:.*@/, '@') : jid;
+}
+
+function getSession(userJid) {
+    const now = Date.now();
+    const defaultPack = process.env.STICKERIN_BOT_NAME || 'Stikerin Aja';
+    const defaultAuthor = process.env.STICKERIN_AUTHOR || 'Bot';
+
+    if (!userJid) {
+        return {
+            pack: defaultPack,
+            author: defaultAuthor,
+            quality: 80,
+            type: 'default',
+            customExpiresAt: null
+        };
+    }
+
+    if (!state.has(userJid)) {
+        state.set(userJid, {
+            pack: defaultPack,
+            author: defaultAuthor,
+            quality: 80,
+            type: 'default',
+            customExpiresAt: null
+        });
+    }
+
+    const session = state.get(userJid);
+    if (session.customExpiresAt && now > session.customExpiresAt) {
+        session.pack = defaultPack;
+        session.author = defaultAuthor;
+        session.customExpiresAt = null;
+    }
+
+    return session;
+}
+
+function extractMessageContent(msg) {
+    if (!msg?.message) return { text: '', quotedMsg: null, quotedStanza: null };
+
+    let m = msg.message;
+    if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message;
+    if (m.viewOnceMessage?.message) m = m.viewOnceMessage.message;
+    if (m.viewOnceMessageV2?.message) m = m.viewOnceMessageV2.message;
+    if (m.viewOnceMessageV2Extension?.message) m = m.viewOnceMessageV2Extension.message;
+    if (m.documentWithCaptionMessage?.message) m = m.documentWithCaptionMessage.message;
+
+    const text = (
+        m.conversation ||
+        m.extendedTextMessage?.text ||
+        m.imageMessage?.caption ||
+        m.videoMessage?.caption ||
+        m.documentMessage?.caption ||
+        ''
+    ).trim();
+
+    const contextInfo =
+        m.extendedTextMessage?.contextInfo ||
+        m.imageMessage?.contextInfo ||
+        m.videoMessage?.contextInfo ||
+        m.documentMessage?.contextInfo ||
+        m.stickerMessage?.contextInfo;
+
+    const quotedMsg = contextInfo?.quotedMessage || null;
+    const quotedStanza = contextInfo?.stanzaId || null;
+
+    return { text, quotedMsg, quotedStanza };
+}
+
+// Per-chat sequential execution queue (FIFO)
+// Guarantees commands in the same chat/group are executed in order without dropping or racing
+const chatQueues = new Map();
+
+function enqueueChatTask(chatJid, task) {
+    const currentPromise = chatQueues.get(chatJid) || Promise.resolve();
+    const nextPromise = currentPromise
+        .catch(() => {})
+        .then(() => task());
+
+    chatQueues.set(chatJid, nextPromise);
+    nextPromise.finally(() => {
+        if (chatQueues.get(chatJid) === nextPromise) {
+            chatQueues.delete(chatJid);
+        }
+    });
+    return nextPromise;
+}
+
+async function handler(sock, msg, logger, sessionId = null, botMode = null) {
+    const remoteJid = msg.key?.remoteJid;
+    if (!remoteJid) return;
+
+    const resolvedMode = botMode || (sessionId && global.botSessions?.[sessionId]?.botMode) || process.env.BOT_MODE || 'dual';
+    if (!shouldProcessMessage(msg, resolvedMode)) return;
+
+    // Per-user session tracking (in groups, participant is user's direct JID; for fromMe, use bot user JID)
+    const senderJid = getSenderJid(msg, sock);
+
+    // Guard against stale messages replayed during WhatsApp reconnects/offline sync
+    if (isMessageStale(msg)) {
+        logger?.warn?.({ msgId: msg.key?.id, chat: remoteJid, sender: senderJid }, '[Handler] Dropped stale message replayed after reconnect');
+        return;
+    }
+
+    const { text: messageText, quotedMsg, quotedStanza } = extractMessageContent(msg);
+
+    // 1. Check if user has an active stateful session (e.g. PDF multi-page creation)
+    const pdfCmd = commands.get('pdf');
+    if (pdfCmd?.handleActiveSession) {
+        try {
+            const handled = await pdfCmd.handleActiveSession({
+                sock, msg, senderJid, remoteJid, logger, messageText, PREFIX
+            });
+            if (handled) return;
+        } catch (sessionErr) {
+            logger.warn({ err: sessionErr }, '[Handler] Active session handling error');
+        }
+    }
+
+    if (!messageText || !messageText.startsWith(PREFIX)) return;
+
+    const [rawCmd, ...args] = messageText.slice(PREFIX.length).trim().split(/\s+/);
+    const cmdName = rawCmd.toLowerCase();
+
+    const cmd = commands.get(cmdName);
+    if (!cmd) return;
+
+    logger.info({ cmd: cmdName, chat: remoteJid, sender: senderJid, fromMe: Boolean(msg.key?.fromMe) }, `→ ${cmdName}`);
+
+    return enqueueChatTask(remoteJid, async () => {
+        try {
+            await cmd.execute({
+                sock, msg, args, cmdName, remoteJid, senderJid, quotedMsg, quotedStanza,
+                session: getSession(senderJid),
+                logger, PREFIX, state
+            });
+        } catch (err) {
+            logger.error({ err, cmd: cmdName }, 'Command error');
+            await sock.sendMessage(remoteJid, {
+                text: `❌ Error: ${err.message || 'Unknown error'}`
+            }, { quoted: msg });
+        }
+    });
+}
+
+module.exports = {
+    handler,
+    commands,
+    getSession,
+    getSenderJid,
+    shouldProcessMessage,
+    isMessageStale,
+    extractMessageContent,
+    enqueueChatTask
+};

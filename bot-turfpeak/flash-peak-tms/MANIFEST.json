@@ -1,0 +1,43 @@
+{
+  "project": "Flash Peak TMS",
+  "documentation_version": "0.2.0-draft",
+  "prepared_on": "2026-11-22",
+  "changelog_from_0_1_1": [
+    "AI-native expansion (D-037..D-040): !ai Omak Peak read-only assistant (rolling-window rate limit 2/min/user, open-scope, santai persona); !agent/!agentconfirm/!agentcancel organizer AI agent with closed action catalog, explicit confirm-by-code, idempotency via atomic PENDING->EXECUTING claim, transactional execution, audit trail, crash recovery; !qna/!saveqna living FAQ with AI extraction from group chat history; engagement hooks (KO series hype recap, champion celebration) grounded in real DB facts; !trivia/!quiz/!pantun community commands",
+    "New tables: ai_action_plans, qna_entries (migration 004). provider_usage.task_type CHECK expanded via table rebuild to include CHAT_OMAK_PEAK, PLAN_AGENT, EXTRACT_QNA, FORMAT_HYPE, GENERATE_PANTUN, REPHRASE_TRIVIA.",
+    "Broad text capture of central-group TEXT messages into inbound_messages (enables !saveqna + future WA-log audits; idempotent; IMAGE evidence path untouched).",
+    "Verified Flash Peak trivia DB at src/data/flashpeak-trivia.json (curated at development time from web research; runtime AI only rephrases, never invents facts).",
+    "worklog.md deduplicated (5 stale file copies collapsed to 1; all 18 unique sessions preserved).",
+    "Fresh-eyes audit findings recorded: approval flow not transactional (LOW, theoretical — WhatsApp messages are sequential); numeric-index column access fragility (LOW, cosmetic); AI-first nickname-to-roster matching enhancement recommended as follow-up (the current tiered deterministic matcher added 2026-11-21 is working with zero false positives); tournament-commands.ts modularization recommended as separate PR.",
+    "Audit-log WA scan (task #3): central-group chat history (2026-11-20 to 2026-11-21) reviewed. Organizer responsiveness varied: many participant questions were answered quickly, but several were left unanswered for extended periods before being answered. (The initial \"no unanswered questions, typically <30s\" reading was corrected after an independent second-opinion audit re-read the logs in full.)"
+  ],
+  "files": [
+    "AGENT.md",
+    "AI_PIPELINE.md",
+    "ARCHITECTURE.md",
+    "COMPETITION_RULES.md",
+    "DATA_MODEL.md",
+    "DECISIONS.md",
+    "FRD.md",
+    "INFRASTRUCTURE.md",
+    "PRD.md",
+    "PROMPT_CATALOG.md",
+    "README.md",
+    "SWARM_PLAN.md",
+    "TESTING.md",
+    "WORKFLOWS.md"
+  ],
+  "research_sources": [
+    "https://developers.openai.com/api/docs/guides/prompt-engineering",
+    "https://developers.openai.com/api/docs/guides/structured-outputs",
+    "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/design-multimodal-prompts",
+    "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/prompts/prompt-design-strategies",
+    "https://github.com/WhiskeySockets/Baileys",
+    "https://github.com/WhiskeySockets/Baileys/releases",
+    "https://www.npmjs.com/package/@whiskeysockets/baileys",
+    "https://baileys.wiki/",
+    "https://play.google.com/store/apps/details?id=com.moco.crgame",
+    "https://flashpeak.net",
+    "https://duniagames.co.id/discover/article/flash-peak-complete-character-guide-names-skills-and-roles/en"
+  ]
+}

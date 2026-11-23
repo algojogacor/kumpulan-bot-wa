@@ -1,0 +1,335 @@
+const birthday = require("./birthdayService");
+const repository = require("../repositories/birthdayRepository");
+const formatter = require("../formatters/birthdayMessageFormatter");
+const birthdayAi = require("./birthdayAiService");
+const cloudinaryService = require("./cloudinaryService");
+
+async function handleIncomingDm(sock, msg, messageText, logger) {
+  const remoteJid = msg.key?.remoteJid;
+  if (!remoteJid || remoteJid.endsWith("@g.us") || msg.key?.fromMe) return false;
+
+  const senderJid = birthday.bareJid(remoteJid);
+  const session = birthday.getDmSession(senderJid);
+  if (!session) return false;
+
+  try {
+    if (!session.promptSent) {
+      const prompt = formatter.formatDmPrompt(session.birthdayPersons);
+      await sock.sendMessage(remoteJid, prompt);
+      session.promptSent = true;
+      return true;
+    }
+
+    if (!session.completed) {
+      await birthday.recordDmAnswer(senderJid, messageText);
+      await sock.sendMessage(remoteJid, {
+        text: "✅ Terima kasih banyak! Confess kamu akan disampaikan secara 100% anonim di grup jam 18:00 WIB, dan prediksimu sudah dicatat untuk dibacakan malam nanti! ✨",
+      });
+      return true;
+    }
+  } catch (err) {
+    logger?.error({ err, senderJid }, "[Birthday] Error handling incoming DM");
+  }
+
+  return false;
+}
+
+async function extractImageBuffer(msg, quotedMsg, quotedStanza, remoteJid, senderJid, logger) {
+  try {
+    const { downloadMediaMessage } = require("@whiskeysockets/baileys");
+    if (msg?.message?.imageMessage) {
+      return await downloadMediaMessage(msg, "buffer", {}, { logger: console });
+    }
+    const viewOnceImg = msg?.message?.viewOnceMessage?.message?.imageMessage ||
+                        msg?.message?.viewOnceMessageV2?.message?.imageMessage ||
+                        msg?.message?.documentWithCaptionMessage?.message?.imageMessage;
+    if (viewOnceImg) {
+      return await downloadMediaMessage(msg, "buffer", {}, { logger: console });
+    }
+    if (quotedMsg?.imageMessage) {
+      return await downloadMediaMessage(
+        { key: { id: quotedStanza, remoteJid, fromMe: false, participant: senderJid }, message: quotedMsg },
+        "buffer",
+        {},
+        { logger: console }
+      );
+    }
+    const quotedViewOnce = quotedMsg?.viewOnceMessage?.message?.imageMessage ||
+                           quotedMsg?.viewOnceMessageV2?.message?.imageMessage ||
+                           quotedMsg?.documentWithCaptionMessage?.message?.imageMessage;
+    if (quotedViewOnce) {
+      return await downloadMediaMessage(
+        { key: { id: quotedStanza, remoteJid, fromMe: false, participant: senderJid }, message: quotedMsg },
+        "buffer",
+        {},
+        { logger: console }
+      );
+    }
+  } catch (err) {
+    logger?.warn({ err }, "[Birthday] Failed to download image buffer");
+  }
+  return null;
+}
+
+const groupMetaCache = new Map();
+
+async function getCachedGroupMetadata(sock, groupJid) {
+  if (!sock?.groupMetadata || !groupJid) return null;
+  const now = Date.now();
+  const cached = groupMetaCache.get(groupJid);
+  if (cached && now - cached.timestamp < 60000) {
+    return cached.data;
+  }
+  try {
+    const data = await sock.groupMetadata(groupJid);
+    if (data) {
+      groupMetaCache.set(groupJid, { data, timestamp: now });
+      return data;
+    }
+  } catch {}
+  return cached?.data || null;
+}
+
+async function isBirthdayPersonMatch(sock, groupJid, candidateJid, persons) {
+  const cJid = birthday.bareJid(candidateJid);
+  if (!cJid || !persons?.length) return false;
+
+  // 1. Direct match (phone JID == phone JID or LID == LID)
+  if (persons.some((p) => birthday.bareJid(p.participantId) === cJid)) {
+    return true;
+  }
+
+  // 2. Linked Device (LID) matching via group metadata
+  if (sock && groupJid) {
+    try {
+      const meta = await getCachedGroupMetadata(sock, groupJid);
+      const participant = (meta?.participants || []).find((part) => {
+        const pid = birthday.bareJid(part?.id);
+        const pjid = birthday.bareJid(part?.jid);
+        const plid = birthday.bareJid(part?.lid);
+        return pid === cJid || pjid === cJid || plid === cJid;
+      });
+      if (participant) {
+        const pid = birthday.bareJid(participant?.id);
+        const pjid = birthday.bareJid(participant?.jid);
+        const plid = birthday.bareJid(participant?.lid);
+        return persons.some((p) => {
+          const target = birthday.bareJid(p.participantId);
+          return target === pid || target === pjid || target === plid;
+        });
+      }
+    } catch {}
+  }
+  return false;
+}
+
+async function handleInteractiveGroupMessage(sock, msg, messageText, quotedStanza, quotedMsg, logger, options = {}) {
+  const remoteJid = msg.key?.remoteJid;
+  if (!remoteJid?.endsWith("@g.us") || msg.key?.fromMe) return false;
+
+  const active = await birthday.isTakeoverActive(remoteJid);
+  if (!active) return false;
+
+  let senderJid = birthday.bareJid(msg.key?.participant || remoteJid);
+  if (senderJid.endsWith("@lid") && sock && remoteJid) {
+    try {
+      const meta = await getCachedGroupMetadata(sock, remoteJid);
+      const part = (meta?.participants || []).find((p) => birthday.bareJid(p?.lid) === senderJid);
+      const canonicalPhone = birthday.bareJid(part?.id || part?.jid);
+      if (canonicalPhone && canonicalPhone.endsWith("@s.whatsapp.net")) {
+        senderJid = canonicalPhone;
+      }
+    } catch {}
+  }
+  const senderName = msg.pushName || "Warga";
+
+  // Always log group messages during active takeover (07:00 - 23:00)
+  const isImage = Boolean(
+    msg.message?.imageMessage ||
+    msg.message?.viewOnceMessage?.message?.imageMessage ||
+    msg.message?.documentWithCaptionMessage?.message?.imageMessage
+  );
+  const logText = isImage ? `[Foto: ${messageText ? `"${messageText}"` : '(tanpa caption)'}]` : messageText;
+  birthday.recordGroupChatMessage(remoteJid, senderName, logText, new Date());
+
+  const isPhotoStoryHashtag = Boolean(isImage && messageText.toLowerCase().includes("#ceritafoto"));
+  if (!quotedStanza && !isPhotoStoryHashtag) return false;
+
+  const meta = await birthday.getTakeoverMetadata(remoteJid);
+  const persons = await birthday.getTakeoverBirthdayPersons(remoteJid);
+  const birthdayPerson = persons[0] || { participantId: "", name: "Teman" };
+
+  try {
+    let uploadedPhotoUrl = "";
+    let uploadedPublicId = "";
+    let uploadedAiStory = "";
+
+    const imageBuffer = isImage ? await extractImageBuffer(msg, quotedMsg, quotedStanza, remoteJid, senderJid, logger) : null;
+    if (imageBuffer) {
+      try {
+        const uploadRes = await cloudinaryService.uploadImage(imageBuffer, "birthday_memories");
+        if (uploadRes.success) {
+          uploadedPhotoUrl = uploadRes.url || "";
+          uploadedPublicId = uploadRes.publicId || "";
+        }
+      } catch (uploadErr) {
+        logger?.warn({ err: uploadErr }, "[Birthday] Auto Cloudinary upload failed");
+      }
+
+      try {
+        uploadedAiStory = await birthdayAi.describeMemoryPhoto({
+          imageBuffer,
+          senderName,
+          caption: messageText,
+          logger,
+        });
+      } catch {}
+
+      if (uploadedPhotoUrl) {
+        await repository.addMemoryPhoto({
+          groupJid: remoteJid,
+          cloudinaryUrl: uploadedPhotoUrl,
+          cloudinaryPublicId: uploadedPublicId,
+          senderId: senderJid,
+          senderName,
+          caption: messageText,
+          aiDescription: uploadedAiStory,
+          sourceType: "birthday_takeover",
+        });
+      }
+    }
+
+    // 1. Truth Questions: reply to truth opening message
+    if (meta.truthSessionMessageId && quotedStanza === meta.truthSessionMessageId) {
+      const isBirthdayPerson = await isBirthdayPersonMatch(sock, remoteJid, senderJid, persons);
+      let target = birthdayPerson;
+      if (isBirthdayPerson) {
+        const context = msg.message?.extendedTextMessage?.contextInfo;
+        const mentioned = (context?.mentionedJid || [])[0];
+        if (mentioned) {
+          target = { participantId: birthday.bareJid(mentioned), name: "Teman" };
+        }
+      }
+
+      const res = await birthday.recordTruthQuestion(remoteJid, senderJid, senderName, target.participantId, target.name, messageText, msg.key.id);
+      if (res?.error === "quota_exceeded") {
+        await sock.sendMessage(remoteJid, { text: `⚠️ Jatah ${res.maxQuota || 5} pertanyaan Truth kamu sudah habis!` }, { quoted: msg });
+      } else {
+        await sock.sendMessage(remoteJid, { react: { text: "❓", key: msg.key } }).catch(() => {});
+      }
+      return true;
+    }
+
+    // Check if replying to a truth question
+    const truthQuestions = meta.truthData?.questions || [];
+    const isTruthAnswer = truthQuestions.some((q) => q.id === quotedStanza);
+    if (isTruthAnswer) {
+      const ansRes = await birthday.recordTruthAnswer(remoteJid, senderJid, messageText, quotedStanza);
+      if (ansRes?.success) {
+        const emoji = ansRes.isHonest ? "🤞" : "💬";
+        await sock.sendMessage(remoteJid, { react: { text: emoji, key: msg.key } }).catch(() => {});
+      }
+      return true;
+    }
+
+    // 2. Birthday Quest Reply
+    if (meta.questMessageId && quotedStanza === meta.questMessageId) {
+      await birthday.recordQuestReply(remoteJid, senderJid, messageText, uploadedPhotoUrl);
+      await sock.sendMessage(remoteJid, { react: { text: "🎯", key: msg.key } }).catch(() => {});
+      return true;
+    }
+
+    // 3. Memory Wall
+    if (meta.memoryWallMessageId && quotedStanza === meta.memoryWallMessageId) {
+      await birthday.recordMemoryWallItem(remoteJid, senderJid, senderName, messageText, uploadedPhotoUrl);
+      await sock.sendMessage(remoteJid, { react: { text: "❤️", key: msg.key } }).catch(() => {});
+      return true;
+    }
+
+    // 4. Photo Story
+    if ((meta.photoStoryMessageId && quotedStanza === meta.photoStoryMessageId) || isPhotoStoryHashtag) {
+      await birthday.recordPhotoStory(remoteJid, {
+        senderId: senderJid,
+        senderName,
+        caption: messageText,
+        photoUrl: uploadedPhotoUrl,
+        aiStory: uploadedAiStory,
+        timestamp: Date.now(),
+      });
+
+      await sock.sendMessage(remoteJid, { react: { text: "📸", key: msg.key } }).catch(() => {});
+      return true;
+    }
+
+    // 5. Roast Session
+    if (meta.roastSessionMessageId && quotedStanza === meta.roastSessionMessageId) {
+      await birthday.recordRoast(remoteJid, senderJid, senderName, messageText, uploadedPhotoUrl);
+      await sock.sendMessage(remoteJid, { react: { text: "🔥", key: msg.key } }).catch(() => {});
+      return true;
+    }
+
+    // 6. Wish Jar
+    if (meta.wishJarMessageId && quotedStanza === meta.wishJarMessageId) {
+      await birthday.recordWishJarItem(remoteJid, senderJid, senderName, messageText, uploadedPhotoUrl);
+      await birthday.recordWishFromMessage(msg);
+      await sock.sendMessage(remoteJid, { react: { text: "🌟", key: msg.key } }).catch(() => {});
+      return true;
+    }
+
+    // 7. Hot Take Night (18:30)
+    if (meta.hotTakeMessageId && quotedStanza === meta.hotTakeMessageId) {
+      const isBirthdayPerson = await isBirthdayPersonMatch(sock, remoteJid, senderJid, persons);
+      await birthday.recordHotTake(remoteJid, senderJid, senderName, messageText, isBirthdayPerson);
+      const emoji = isBirthdayPerson ? "🛡️" : "🔥";
+      await sock.sendMessage(remoteJid, { react: { text: emoji, key: msg.key } }).catch(() => {});
+      return true;
+    }
+
+    // 8. Satu Hal yang Belum Pernah Diucapkan (19:00)
+    if (meta.unsaidThingMessageId && quotedStanza === meta.unsaidThingMessageId) {
+      await birthday.recordUnsaidThing(remoteJid, senderJid, senderName, messageText);
+      await sock.sendMessage(remoteJid, { react: { text: "🕊️", key: msg.key } }).catch(() => {});
+      return true;
+    }
+
+    // 9. Kalau Kamu Jadi... (19:15)
+    if (meta.whatIfMessageId && quotedStanza === meta.whatIfMessageId) {
+      await birthday.recordWhatIfAnswer(remoteJid, senderJid, senderName, messageText);
+      await sock.sendMessage(remoteJid, { react: { text: "🎭", key: msg.key } }).catch(() => {});
+      return true;
+    }
+
+    // 10. Rate The Day (23:30)
+    if (meta.rateTheDayMessageId && quotedStanza === meta.rateTheDayMessageId) {
+      const parsed = birthday.parseRateTheDay(messageText);
+      await birthday.recordRateTheDay(remoteJid, senderJid, parsed.rating, parsed.reason, messageText);
+      await sock.sendMessage(remoteJid, { react: { text: "⭐", key: msg.key } }).catch(() => {});
+      return true;
+    }
+
+    // Legacy card wish fallback
+    if ((await birthday.getWishMessageId(remoteJid)) === quotedStanza) {
+      await birthday.recordWishFromMessage(msg);
+      await sock.sendMessage(remoteJid, { react: { text: "🎂", key: msg.key } }).catch(() => {});
+      return true;
+    }
+
+    // Fallback: any other photo replied during active takeover
+    if (isImage && uploadedPhotoUrl) {
+      if (options?.isKnownCommand) return false;
+      await sock.sendMessage(remoteJid, { react: { text: "📸", key: msg.key } }).catch(() => {});
+      return true;
+    }
+  } catch (err) {
+    logger?.error({ err, remoteJid }, "[Birthday] Error handling interactive group message");
+  }
+
+  return false;
+}
+
+module.exports = {
+  shouldSuppressCron: birthday.shouldSuppressCron,
+  recordWishFromMessage: birthday.recordWishFromMessage,
+  handleIncomingDm,
+  handleInteractiveGroupMessage,
+};
